@@ -3,6 +3,7 @@
 #include <sdl/SDL.h>
 #include <glew/glew.h>
 
+#include <array>
 #include <iostream>
 #include <functional>
 
@@ -32,7 +33,98 @@ namespace {
 		GLfloat z;
 	};
 
+	struct Color {
+		GLfloat r;
+		GLfloat g;
+		GLfloat b;
+		GLfloat a;
+	};
+
 }
+
+class VertexStream {
+
+public:
+
+	// ==============
+	// Exported Types
+	// ==============
+
+	struct Vertex {
+		Vector3 position;
+		Color color;
+	};
+
+
+private:
+
+	// ==============
+	// Representation
+	// ==============
+
+	GLuint vao = 0u;
+	GLuint vbo_vertices = 0u;
+
+	const std::size_t VERTEX_COUNT;
+
+public:
+
+	// ============
+	// Construction
+	// ============
+
+	template<std::size_t ArrSize>
+	VertexStream(const std::array<Vertex, ArrSize>& vertices)
+		: VERTEX_COUNT(ArrSize)
+	{
+		// Create VAO
+		glGenVertexArrays(1, &vao);
+		glBindVertexArray(vao);
+		glObjectLabel(GL_VERTEX_ARRAY, vao, -1, "agfx::VertexArrayObject");
+
+		// Create vertices buffer
+		glGenBuffers(1, &vbo_vertices);
+		glBindBuffer(GL_ARRAY_BUFFER, vbo_vertices);
+		glObjectLabel(GL_BUFFER, vbo_vertices, -1, "agfx::VertexArrayObject.Vertices");
+
+		glBufferStorage(GL_ARRAY_BUFFER, sizeof(vertices), vertices.data(), 0u);
+
+		glEnableVertexAttribArray(0);
+		glVertexAttribPointer(0, 3, GL_FLOAT, GL_FALSE, sizeof(Vertex), reinterpret_cast<void*>(offsetof(Vertex, position)));
+
+		glEnableVertexAttribArray(1);
+		glVertexAttribPointer(1, 4, GL_FLOAT, GL_FALSE, sizeof(Vertex), reinterpret_cast<void*>(offsetof(Vertex, color)));
+
+		glBindBuffer(GL_ARRAY_BUFFER, NULL);
+
+		// Cleanup
+		glBindVertexArray(NULL);
+	}
+
+	~VertexStream()
+	{
+		glDeleteBuffers(1, &vbo_vertices);
+		glDeleteVertexArrays(1, &vao);
+	}
+
+	VertexStream(const VertexStream&) = delete;
+	VertexStream& operator=(const VertexStream&) = delete;
+
+	VertexStream(VertexStream&&) = default;
+	VertexStream& operator=(VertexStream&&) = default;
+
+	// ================
+	// Public Interface
+	// ================
+
+	void draw() const noexcept
+	{
+		glBindVertexArray(vao);
+		glDrawArrays(GL_TRIANGLE_STRIP, 0, VERTEX_COUNT);
+		glBindVertexArray(NULL);
+	}
+
+};
 
 class Program {
 
@@ -42,18 +134,29 @@ class Program {
 	SDL_GLContext context = nullptr;
 
 	GLuint program = 0u;
-	GLuint vao = 0u;
-	GLuint vbo_vertices = 0u;
+	std::unique_ptr<VertexStream> vertex_stream{};
 
 	bool quit = false;
 	bool skip_render = false;
 	SDL_Event cur_event{};
 
-	static constexpr Vector3 vertices[] = {
-		{ -0.5f, +0.5f, 0.5f },
-		{ -0.5f, -0.5f, 0.5f },
-		{ +0.5f, +0.5f, 0.5f },
-		{ +0.5f, -0.5f, 0.5f },
+	static constexpr std::array<VertexStream::Vertex, 4> VERTICES = {
+		VertexStream::Vertex{ // Top Left
+			Vector3{ -0.5f, +0.5f, 0.5f },
+			Color{1.0f, 0.0f, 0.0f, 1.0f},
+		},
+		VertexStream::Vertex{ // Bottom Left
+			Vector3{ -0.5f, -0.5f, 0.5f },
+			Color{1.0f, 0.0f, 1.0f, 1.0f},
+		},
+		VertexStream::Vertex{ // Top Right
+			Vector3{ +0.5f, +0.5f, 0.5f },
+			Color{1.0f, 1.0f, 0.0f, 1.0f},
+		},
+		VertexStream::Vertex{ // Bottom Right
+			Vector3{ +0.5f, -0.5f, 0.5f },
+			Color{1.0f, 1.0f, 1.0f, 1.0f},
+		},
 	};
 
 	enum UniformLocation {
@@ -99,8 +202,6 @@ public:
 
 	~Program()
 	{
-		glDeleteVertexArrays(1, &vao);
-		glDeleteBuffers(1, &vbo_vertices);
 		glDeleteProgram(program);
 
 		SDL_GL_DeleteContext(context);
@@ -109,10 +210,8 @@ public:
 
 	void run()
 	{
-		//log_info();
-
 		create_shader();
-		create_buffer();
+		vertex_stream.reset(new VertexStream(VERTICES));
 
 		glPointSize(4.0f);
 		glPolygonMode(GL_BACK, GL_LINE);
@@ -127,9 +226,7 @@ public:
 				glUseProgram(program);
 				update_uniforms();
 
-				glBindVertexArray(vao);
-				glDrawArrays(GL_TRIANGLE_STRIP, 0, 4);
-				glBindVertexArray(NULL);
+				vertex_stream->draw();
 
 				glUseProgram(NULL);
 			}
@@ -160,10 +257,14 @@ private:
 		std::cout << glGetString(GL_VENDOR) << '\n';
 		std::cout << glGetString(GL_RENDERER) << '\n';
 		std::cout << glGetString(GL_SHADING_LANGUAGE_VERSION) << '\n';
+		std::puts("");
 
 		GLint max;
 		glGetIntegerv(GL_MAX_LABEL_LENGTH, &max);
-		std::cout << "Max Label Length: " << max << '\n';
+		std::cout << "Max label length: " << max << '\n';
+
+		glGetIntegerv(GL_MAX_VERTEX_ATTRIBS, &max);
+		std::cout << "Max vertex attributes: " << max << '\n';
 
 #if 0
 		// Log supported GLSL versions
@@ -227,45 +328,19 @@ private:
 			Util::set_color(AnsiColor::RED);
 			puts("Shader did not link successfully. Skipping render loop.");
 			Util::clear_color();
-		} else {
-			skip_render = false;
 
+			skip_render = true;
+		} else {
 			Sint32 width, height;
 			SDL_GetWindowSize(window, &width, &height);
-			glUseProgram(program);
 			glUniform2i(0, width, height);
-			glUseProgram(NULL);
+
+			skip_render = false;
 		}
 
+		glUseProgram(NULL);
+
 		print_div("SHADER END");
-
-	}
-
-	void create_buffer()
-	{
-		// VAO
-		glGenVertexArrays(1, &vao);
-		glBindVertexArray(vao);
-		glObjectLabel(GL_VERTEX_ARRAY, vao, -1, "agfx::vao");
-
-		// VBO
-		glGenBuffers(1, &vbo_vertices);
-		glBindBuffer(GL_ARRAY_BUFFER, vbo_vertices);
-		glObjectLabel(GL_BUFFER, vbo_vertices, -1, "agfx::vbo_vertices");
-
-		glBufferStorage(GL_ARRAY_BUFFER, sizeof(vertices), NULL, GL_MAP_WRITE_BIT);
-		void* map_ptr = glMapBufferRange(GL_ARRAY_BUFFER, 0, sizeof(vertices), GL_MAP_WRITE_BIT);
-		std::memcpy(map_ptr, vertices, sizeof(vertices));
-		glUnmapBuffer(GL_ARRAY_BUFFER);
-
-		glEnableVertexAttribArray(0);
-		glVertexAttribPointer(0, 3, GL_FLOAT, GL_FALSE, sizeof(Vector3), reinterpret_cast<void*>(0));
-
-		
-
-		// Cleanup
-		glBindBuffer(GL_ARRAY_BUFFER, NULL);
-		glBindVertexArray(NULL);
 	}
 
 	void handle_events()
@@ -291,6 +366,10 @@ private:
 
 							glDeleteProgram(program);
 							create_shader();
+							break;
+
+						case SDL_SCANCODE_F1:
+							log_info();
 							break;
 					}
 					break;
