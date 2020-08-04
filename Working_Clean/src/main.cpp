@@ -1,5 +1,7 @@
 #include "Util.h"
 
+#include "ShaderUtil.h"
+
 #include <sdl/SDL.h>
 #include <glew/glew.h>
 
@@ -19,13 +21,6 @@ static void GLAPIENTRY gl_message_callback(GLenum source, GLenum type, GLuint id
 }
 
 namespace {
-
-	void print_div(const char* text)
-	{
-		Util::set_color(AnsiColor::YELLOW);
-		std::cout << "\n===== " << text << " =====\n\n";
-		Util::clear_color();
-	}
 
 	struct Vector3 {
 		GLfloat x;
@@ -80,12 +75,12 @@ public:
 		// Create VAO
 		glGenVertexArrays(1, &vao);
 		glBindVertexArray(vao);
-		glObjectLabel(GL_VERTEX_ARRAY, vao, -1, "agfx::VertexArrayObject");
+		glObjectLabel(GL_VERTEX_ARRAY, vao, -1, "agfx::VAO");
 
 		// Create vertices buffer
 		glGenBuffers(1, &vbo_vertices);
 		glBindBuffer(GL_ARRAY_BUFFER, vbo_vertices);
-		glObjectLabel(GL_BUFFER, vbo_vertices, -1, "agfx::VertexArrayObject.Vertices");
+		glObjectLabel(GL_BUFFER, vbo_vertices, -1, "agfx::VAO.Vertices");
 
 		glBufferStorage(GL_ARRAY_BUFFER, sizeof(vertices), vertices.data(), 0u);
 
@@ -130,31 +125,38 @@ class Program {
 
 	static constexpr unsigned int SWAP_DELAY = 1000u / 60u + 1;
 
+	float total_time = 0.0f;
+	float corrected_time = 0.0f;
+
 	SDL_Window* window = nullptr;
 	SDL_GLContext context = nullptr;
 
 	GLuint program = 0u;
+	GLuint ubo_transform = 0u;
+	GLuint ubo_time = 0u;
 	std::unique_ptr<VertexStream> vertex_stream{};
 
 	bool quit = false;
 	bool skip_render = false;
 	SDL_Event cur_event{};
 
+	const Uint8* ScancodeMap = nullptr;
+
 	static constexpr std::array<VertexStream::Vertex, 4> VERTICES = {
 		VertexStream::Vertex{ // Top Left
-			Vector3{ -0.5f, +0.5f, 0.5f },
+			Vector3{ -1.0f, +1.0f, 0.5f },
 			Color{1.0f, 0.0f, 0.0f, 1.0f},
 		},
 		VertexStream::Vertex{ // Bottom Left
-			Vector3{ -0.5f, -0.5f, 0.5f },
+			Vector3{ -1.0f, -1.0f, 0.5f },
 			Color{1.0f, 0.0f, 1.0f, 1.0f},
 		},
 		VertexStream::Vertex{ // Top Right
-			Vector3{ +0.5f, +0.5f, 0.5f },
+			Vector3{ +1.0f, +1.0f, 0.5f },
 			Color{1.0f, 1.0f, 0.0f, 1.0f},
 		},
 		VertexStream::Vertex{ // Bottom Right
-			Vector3{ +0.5f, -0.5f, 0.5f },
+			Vector3{ +1.0f, -1.0f, 0.5f },
 			Color{1.0f, 1.0f, 1.0f, 1.0f},
 		},
 	};
@@ -163,6 +165,17 @@ class Program {
 		UNIFORM_WINDOW_SIZE = 0,
 		UNIFORM_TIME = 1,
 		UNIFORM_MOUSE_POSITION = 2,
+	};
+
+	struct UniformBlockBinding {
+		enum {
+			TIME = 0,
+			TRANFORM = 1,
+		};
+	};
+
+	struct UniformBlockSize {
+		static constexpr unsigned int TIME = 4 * 2;
 	};
 
 public:
@@ -195,6 +208,9 @@ public:
 
 		glEnable(GL_DEBUG_OUTPUT);
 		glDebugMessageCallback(gl_message_callback, nullptr);
+		glDebugMessageControl(GL_DONT_CARE, GL_DONT_CARE, GL_DEBUG_SEVERITY_NOTIFICATION, 0, nullptr, GL_FALSE); // no notifications
+
+		ScancodeMap = SDL_GetKeyboardState(nullptr);
 
 		// Force update to trigger viewport resize and setting uniforms
 		SDL_SetWindowSize(window, 1280, 720);
@@ -202,14 +218,16 @@ public:
 
 	~Program()
 	{
+		glDeleteBuffers(1, &ubo_time);
 		glDeleteProgram(program);
 
 		SDL_GL_DeleteContext(context);
 		SDL_DestroyWindow(window);
 	}
 
-	void run()
+	void run() noexcept
 	{
+		create_buffers();
 		create_shader();
 		vertex_stream.reset(new VertexStream(VERTICES));
 
@@ -218,6 +236,11 @@ public:
 
 		while (!quit) {
 			handle_events();
+
+			total_time += SWAP_DELAY / 1000.0f;
+			if (!ScancodeMap[SDL_SCANCODE_RSHIFT]) {
+				corrected_time += SWAP_DELAY / 1000.0f;
+			}
 
 			glClearColor(0.1f, 0.1f, 0.1f, 1.0f);
 			glClear(GL_COLOR_BUFFER_BIT);
@@ -239,8 +262,24 @@ public:
 
 private:
 
-	void update_uniforms()
+	void update_ubo_time() noexcept
 	{
+		glBindBuffer(GL_UNIFORM_BUFFER, ubo_time);
+		std::byte* ptr = static_cast<std::byte*>(glMapBufferRange(GL_UNIFORM_BUFFER, 0, UniformBlockSize::TIME, GL_MAP_WRITE_BIT));
+		new(ptr) float{ total_time };
+		ptr += 4;
+		new(ptr) float{ corrected_time };
+		glUnmapBuffer(GL_UNIFORM_BUFFER);
+		glBindBuffer(GL_UNIFORM_BUFFER, NULL);
+	}
+
+	/// Shader program must be active ahead of time
+	void update_uniforms() noexcept
+	{
+		// UBOs
+		update_ubo_time();
+
+		// Program specific
 		glUniform1f(UNIFORM_TIME, static_cast<float>(SDL_GetTicks()) / 1000.0f);
 		int x, y;
 		SDL_GetMouseState(&x, &y);
@@ -249,9 +288,9 @@ private:
 		glUniform2i(UNIFORM_MOUSE_POSITION, x, height - y);
 	}
 
-	void log_info()
+	void log_info() noexcept
 	{
-		print_div("INFO BEGIN");
+		Util::print_divider("Info Begin");
 
 		std::cout << glGetString(GL_VERSION) << '\n';
 		std::cout << glGetString(GL_VENDOR) << '\n';
@@ -259,13 +298,27 @@ private:
 		std::cout << glGetString(GL_SHADING_LANGUAGE_VERSION) << '\n';
 		std::puts("");
 
-		GLint max;
-		glGetIntegerv(GL_MAX_LABEL_LENGTH, &max);
-		std::cout << "Max label length: " << max << '\n';
+		GLint value;
+		glGetIntegerv(GL_MAX_LABEL_LENGTH, &value);
+		std::cout << "Max label length: " << value << '\n';
 
-		glGetIntegerv(GL_MAX_VERTEX_ATTRIBS, &max);
-		std::cout << "Max vertex attributes: " << max << '\n';
+		glGetIntegerv(GL_MAX_VERTEX_ATTRIBS, &value);
+		std::cout << "Max vertex attributes: " << value << '\n';
 
+		glGetIntegerv(GL_MAX_UNIFORM_LOCATIONS, &value);
+		std::cout << "Max uniform locations: " << value << '\n';
+
+		glGetIntegerv(GL_MAX_UNIFORM_BUFFER_BINDINGS, &value);
+		std::cout << "Max uniform buffers: " << value << '\n';
+
+		glGetIntegerv(GL_MAX_VERTEX_UNIFORM_BLOCKS, &value);
+		std::cout << "Max uniform buffers in vertex shader: " << value << '\n';
+
+		glGetIntegerv(GL_MAX_FRAGMENT_UNIFORM_BLOCKS, &value);
+		std::cout << "Max uniform buffers in fragment shader: " << value << '\n';
+
+		glGetIntegerv(GL_MAX_TEXTURE_SIZE, &value);
+		std::cout << "Max texture size: " << value << '\n';
 #if 0
 		// Log supported GLSL versions
 		{
@@ -277,73 +330,65 @@ private:
 		}
 #endif
 
-		print_div("INFO END");
+		Util::print_divider("Info End");
 	}
 
-	void create_shader()
+	void create_buffers() noexcept
 	{
-		print_div("SHADER BEGIN");
+		glGenBuffers(1, &ubo_time);
+		glBindBuffer(GL_UNIFORM_BUFFER, ubo_time);
+		glObjectLabel(GL_BUFFER, ubo_time, -1, "agfx::UBO::TimeBlock");
+		glBufferStorage(GL_UNIFORM_BUFFER, UniformBlockSize::TIME, nullptr, GL_MAP_WRITE_BIT);
+		glBindBuffer(GL_UNIFORM_BUFFER, NULL);
 
-		GLchar out_buf[1024];
-		const GLchar* src[1];
-		GLint length[1];
+		glBindBufferBase(GL_UNIFORM_BUFFER, UniformBlockBinding::TIME, ubo_time);
+	}
 
-		auto create = [&](const std::string& name, GLuint handle) {
-			std::string source = Util::read_file(name);
+	void create_shader() noexcept
+	{
+		static const std::string BASE_PATH = "../Working_Clean/src/";
 
-			src[0] = source.data();
-			length[0] = source.length();
+		Util::print_divider("Shader Compilation Begin");
 
-			glShaderSource(handle, 1, src, length);
-			glCompileShader(handle);
-		};
+		try {
+			program = ShaderUtil::compile_shader(
+				BASE_PATH + "first.vert",
+				BASE_PATH + "first.frag");
 
-		std::string place = "../Working_Clean/src/";
+			std::puts("Shader compiled successfully");
 
-		GLuint vertex_shader = glCreateShader(GL_VERTEX_SHADER);
-		create(place + "first.vert", vertex_shader);
-
-		GLuint frag_shader = glCreateShader(GL_FRAGMENT_SHADER);
-		create(place + "first.frag", frag_shader);
-
-		program = glCreateProgram();
-		glObjectLabel(GL_PROGRAM, program, -1, "agfx::program");
-		glAttachShader(program, vertex_shader);
-		glAttachShader(program, frag_shader);
-
-		glLinkProgram(program);
-		glGetProgramInfoLog(program, sizeof(out_buf), nullptr, out_buf);
-
-		std::cout << "Program Info:\n" << out_buf;
-
-		glDetachShader(program, vertex_shader);
-		glDeleteShader(vertex_shader);
-
-		glDetachShader(program, frag_shader);
-		glDeleteShader(frag_shader);
-
-		GLint success;
-		glGetProgramiv(program, GL_LINK_STATUS, &success);
-		if (!success) {
-			Util::set_color(AnsiColor::RED);
-			puts("Shader did not link successfully. Skipping render loop.");
-			Util::clear_color();
-
-			skip_render = true;
-		} else {
+			// Set window size uniform
+			glUseProgram(program);
 			Sint32 width, height;
 			SDL_GetWindowSize(window, &width, &height);
 			glUniform2i(0, width, height);
+			glUseProgram(NULL);
+
+			// Setup uniform blocks
+			if (const GLuint idx = glGetUniformBlockIndex(program, "TransformBlock"); idx == GL_INVALID_INDEX) {
+				std::cerr << "Failed to find index for transform block\n";
+			} else {
+				glUniformBlockBinding(program, idx, UniformBlockBinding::TRANFORM);
+				//glBindBufferBase(GL_UNIFORM_BUFFER, UniformBlockBinding::TRANFORM, ub_transform);
+			}
+
+			glBindBufferBase(GL_UNIFORM_BUFFER, UniformBlockBinding::TIME, ubo_time);
 
 			skip_render = false;
+		} catch (const ShaderCompilationException&) {
+			program = NULL;
+
+			Util::set_color(AnsiColor::RED);
+			std::puts("Shader failed to compile");
+			Util::clear_color();
+
+			skip_render = true;
 		}
 
-		glUseProgram(NULL);
-
-		print_div("SHADER END");
+		Util::print_divider("Shader Compilation End");
 	}
 
-	void handle_events()
+	void handle_events() noexcept
 	{
 		while (SDL_PollEvent(&cur_event)) {
 			switch (cur_event.type) {
@@ -385,9 +430,11 @@ private:
 							Util::clear_color();
 
 							glViewport(0, 0, width, height);
-							glUseProgram(program);
-							glUniform2i(UNIFORM_WINDOW_SIZE, width, height);
-							glUseProgram(NULL);
+							if (program != NULL) {
+								glUseProgram(program);
+								glUniform2i(UNIFORM_WINDOW_SIZE, width, height);
+								glUseProgram(NULL);
+							}
 
 							break;
 					}
