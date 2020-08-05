@@ -147,15 +147,19 @@
     </Link>
   </ItemDefinitionGroup>
   <ItemGroup>
+    <ClCompile Include="src\Model.cpp" />
     <ClCompile Include="src\ShaderUtil.cpp" />
     <ClCompile Include="src\main.cpp" />
     <ClCompile Include="src\Util.cpp" />
   </ItemGroup>
   <ItemGroup>
-    <None Include="src\first.frag" />
-    <None Include="src\first.vert" />
+    <None Include="shaders\first.frag" />
+    <None Include="shaders\first.vert" />
+    <None Include="shaders\model.frag" />
+    <None Include="shaders\model.vert" />
   </ItemGroup>
   <ItemGroup>
+    <ClInclude Include="src\Model.h" />
     <ClInclude Include="src\ShaderUtil.h" />
     <ClInclude Include="src\Util.h" />
   </ItemGroup>

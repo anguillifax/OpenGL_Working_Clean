@@ -12,7 +12,7 @@ namespace coral {
 	class ShaderUtil {
 	public:
 
-		[[nodiscard]] static GLuint compile_shader(const std::string& vertex_shader_path, const std::string& fragment_shader_path);
+		[[nodiscard]] static GLuint compile_shader(const std::string& vertex_shader_path, const std::string& fragment_shader_path, const char* label);
 
 	};
 

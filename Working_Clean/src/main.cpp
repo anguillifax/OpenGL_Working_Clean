@@ -1,13 +1,17 @@
 #include "Util.h"
 
 #include "ShaderUtil.h"
+#include "Model.h"
 
-#include <sdl/SDL.h>
 #include <glew/glew.h>
+#include <glm/matrix.hpp>
+#include <glm/vec3.hpp>
+#include <sdl/SDL.h>
 
 #include <array>
-#include <iostream>
+#include <cstdint>
 #include <functional>
+#include <iostream>
 
 using namespace coral;
 
@@ -20,104 +24,81 @@ static void GLAPIENTRY gl_message_callback(GLenum source, GLenum type, GLuint id
 	output << message << '\n';
 }
 
-namespace {
+class UniformBlockApplication {
 
-	struct Vector3 {
-		GLfloat x;
-		GLfloat y;
-		GLfloat z;
-	};
+	static constexpr unsigned int BINDING = 0u;
+	static constexpr unsigned int SIZE =
+		4 * 2   // window_size
+		+ 4 * 2 // mouse_position
+		+ 4     // total_time
+		+ 4     // corrected_time
+		;
 
-	struct Color {
-		GLfloat r;
-		GLfloat g;
-		GLfloat b;
-		GLfloat a;
-	};
-
-}
-
-class VertexStream {
+	GLuint ubo;
 
 public:
 
-	// ==============
-	// Exported Types
-	// ==============
+	UniformBlockApplication()
+	{
+		glGenBuffers(1, &ubo);
+		glBindBuffer(GL_UNIFORM_BUFFER, ubo);
+		glObjectLabel(GL_BUFFER, ubo, -1, "UBO::Application");
+		glBufferStorage(GL_UNIFORM_BUFFER, SIZE, nullptr, GL_MAP_WRITE_BIT);
+		glBindBuffer(GL_UNIFORM_BUFFER, NULL);
+	}
 
-	struct Vertex {
-		Vector3 position;
-		Color color;
+	~UniformBlockApplication()
+	{
+		glDeleteBuffers(1, &ubo);
+	}
+
+	UniformBlockApplication(const UniformBlockApplication&) = delete;
+	UniformBlockApplication& operator=(const UniformBlockApplication&) = delete;
+
+	UniformBlockApplication(UniformBlockApplication&&) = default;
+	UniformBlockApplication& operator=(UniformBlockApplication&&) = default;
+
+	void bind() const
+	{
+		glBindBufferBase(GL_UNIFORM_BUFFER, BINDING, ubo);
+	}
+
+	void update(int win_width, int win_height, int mouse_x, int mouse_y, float ttime, float ctime)
+	{
+		glBindBuffer(GL_UNIFORM_BUFFER, ubo);
+		std::byte* ptr = static_cast<std::byte*>(glMapBufferRange(GL_UNIFORM_BUFFER, 0, SIZE, GL_MAP_WRITE_BIT));
+
+		new(ptr) int(win_width);
+		new(ptr += 4) int(win_height);
+
+		new(ptr += 4) int(mouse_x);
+		new(ptr += 4) int(mouse_y);
+
+		new(ptr += 4) float(ttime);
+		new(ptr += 4) float(ctime);
+
+		glUnmapBuffer(GL_UNIFORM_BUFFER);
+		glBindBuffer(GL_UNIFORM_BUFFER, NULL);
+	}
+
+};
+
+struct VertexBank {
+
+	static constexpr std::array<Model::Vertex, 4> RECT = {
+		Model::Vertex{ // Top Left
+			glm::vec3{ -1.0f, +1.0f, 0.5f },
+		},
+		Model::Vertex{ // Bottom Left
+			glm::vec3{ -1.0f, -1.0f, 0.5f },
+		},
+		Model::Vertex{ // Top Right
+			glm::vec3{ +1.0f, +1.0f, 0.5f },
+		},
+		Model::Vertex{ // Bottom Right
+			glm::vec3{ +1.0f, -1.0f, 0.5f },
+		},
 	};
-
-
-private:
-
-	// ==============
-	// Representation
-	// ==============
-
-	GLuint vao = 0u;
-	GLuint vbo_vertices = 0u;
-
-	const std::size_t VERTEX_COUNT;
-
-public:
-
-	// ============
-	// Construction
-	// ============
-
-	template<std::size_t ArrSize>
-	VertexStream(const std::array<Vertex, ArrSize>& vertices)
-		: VERTEX_COUNT(ArrSize)
-	{
-		// Create VAO
-		glGenVertexArrays(1, &vao);
-		glBindVertexArray(vao);
-		glObjectLabel(GL_VERTEX_ARRAY, vao, -1, "agfx::VAO");
-
-		// Create vertices buffer
-		glGenBuffers(1, &vbo_vertices);
-		glBindBuffer(GL_ARRAY_BUFFER, vbo_vertices);
-		glObjectLabel(GL_BUFFER, vbo_vertices, -1, "agfx::VAO.Vertices");
-
-		glBufferStorage(GL_ARRAY_BUFFER, sizeof(vertices), vertices.data(), 0u);
-
-		glEnableVertexAttribArray(0);
-		glVertexAttribPointer(0, 3, GL_FLOAT, GL_FALSE, sizeof(Vertex), reinterpret_cast<void*>(offsetof(Vertex, position)));
-
-		glEnableVertexAttribArray(1);
-		glVertexAttribPointer(1, 4, GL_FLOAT, GL_FALSE, sizeof(Vertex), reinterpret_cast<void*>(offsetof(Vertex, color)));
-
-		glBindBuffer(GL_ARRAY_BUFFER, NULL);
-
-		// Cleanup
-		glBindVertexArray(NULL);
-	}
-
-	~VertexStream()
-	{
-		glDeleteBuffers(1, &vbo_vertices);
-		glDeleteVertexArrays(1, &vao);
-	}
-
-	VertexStream(const VertexStream&) = delete;
-	VertexStream& operator=(const VertexStream&) = delete;
-
-	VertexStream(VertexStream&&) = default;
-	VertexStream& operator=(VertexStream&&) = default;
-
-	// ================
-	// Public Interface
-	// ================
-
-	void draw() const noexcept
-	{
-		glBindVertexArray(vao);
-		glDrawArrays(GL_TRIANGLE_STRIP, 0, VERTEX_COUNT);
-		glBindVertexArray(NULL);
-	}
 
 };
 
@@ -132,51 +113,14 @@ class Program {
 	SDL_GLContext context = nullptr;
 
 	GLuint program = 0u;
-	GLuint ubo_transform = 0u;
-	GLuint ubo_time = 0u;
-	std::unique_ptr<VertexStream> vertex_stream{};
+	std::unique_ptr<UniformBlockApplication> ub_application{};
+	std::unique_ptr<Model> model{};
 
 	bool quit = false;
 	bool skip_render = false;
 	SDL_Event cur_event{};
 
 	const Uint8* ScancodeMap = nullptr;
-
-	static constexpr std::array<VertexStream::Vertex, 4> VERTICES = {
-		VertexStream::Vertex{ // Top Left
-			Vector3{ -1.0f, +1.0f, 0.5f },
-			Color{1.0f, 0.0f, 0.0f, 1.0f},
-		},
-		VertexStream::Vertex{ // Bottom Left
-			Vector3{ -1.0f, -1.0f, 0.5f },
-			Color{1.0f, 0.0f, 1.0f, 1.0f},
-		},
-		VertexStream::Vertex{ // Top Right
-			Vector3{ +1.0f, +1.0f, 0.5f },
-			Color{1.0f, 1.0f, 0.0f, 1.0f},
-		},
-		VertexStream::Vertex{ // Bottom Right
-			Vector3{ +1.0f, -1.0f, 0.5f },
-			Color{1.0f, 1.0f, 1.0f, 1.0f},
-		},
-	};
-
-	enum UniformLocation {
-		UNIFORM_WINDOW_SIZE = 0,
-		UNIFORM_TIME = 1,
-		UNIFORM_MOUSE_POSITION = 2,
-	};
-
-	struct UniformBlockBinding {
-		enum {
-			TIME = 0,
-			TRANFORM = 1,
-		};
-	};
-
-	struct UniformBlockSize {
-		static constexpr unsigned int TIME = 4 * 2;
-	};
 
 public:
 
@@ -212,25 +156,25 @@ public:
 
 		ScancodeMap = SDL_GetKeyboardState(nullptr);
 
-		// Force update to trigger viewport resize and setting uniforms
+		create_buffers();
+		create_shader();
+		ub_application.reset(new UniformBlockApplication());
+		model.reset(new Model(VertexBank::RECT.data(), VertexBank::RECT.size(), "Model::Main"));
+
+		// Force update to trigger viewport resize
 		SDL_SetWindowSize(window, 1280, 720);
 	}
 
 	~Program()
 	{
-		glDeleteBuffers(1, &ubo_time);
 		glDeleteProgram(program);
 
 		SDL_GL_DeleteContext(context);
 		SDL_DestroyWindow(window);
 	}
 
-	void run() noexcept
+	void run()
 	{
-		create_buffers();
-		create_shader();
-		vertex_stream.reset(new VertexStream(VERTICES));
-
 		glPointSize(4.0f);
 		glPolygonMode(GL_BACK, GL_LINE);
 
@@ -245,11 +189,13 @@ public:
 			glClearColor(0.1f, 0.1f, 0.1f, 1.0f);
 			glClear(GL_COLOR_BUFFER_BIT);
 
+			update_uniforms();
+
 			if (!skip_render) {
 				glUseProgram(program);
-				update_uniforms();
+				ub_application->bind();
 
-				vertex_stream->draw();
+				model->draw();
 
 				glUseProgram(NULL);
 			}
@@ -262,33 +208,18 @@ public:
 
 private:
 
-	void update_ubo_time() noexcept
+
+	void update_uniforms()
 	{
-		glBindBuffer(GL_UNIFORM_BUFFER, ubo_time);
-		std::byte* ptr = static_cast<std::byte*>(glMapBufferRange(GL_UNIFORM_BUFFER, 0, UniformBlockSize::TIME, GL_MAP_WRITE_BIT));
-		new(ptr) float{ total_time };
-		ptr += 4;
-		new(ptr) float{ corrected_time };
-		glUnmapBuffer(GL_UNIFORM_BUFFER);
-		glBindBuffer(GL_UNIFORM_BUFFER, NULL);
+		int mx, my;
+		SDL_GetMouseState(&mx, &my);
+		int width, height;
+		SDL_GetWindowSize(window, &width, &height);
+
+		ub_application->update(width, height, mx, height - my, total_time, corrected_time);
 	}
 
-	/// Shader program must be active ahead of time
-	void update_uniforms() noexcept
-	{
-		// UBOs
-		update_ubo_time();
-
-		// Program specific
-		glUniform1f(UNIFORM_TIME, static_cast<float>(SDL_GetTicks()) / 1000.0f);
-		int x, y;
-		SDL_GetMouseState(&x, &y);
-		int height;
-		SDL_GetWindowSize(window, nullptr, &height);
-		glUniform2i(UNIFORM_MOUSE_POSITION, x, height - y);
-	}
-
-	void log_info() noexcept
+	void log_info()
 	{
 		Util::print_divider("Info Begin");
 
@@ -333,46 +264,25 @@ private:
 		Util::print_divider("Info End");
 	}
 
-	void create_buffers() noexcept
+	void create_buffers()
 	{
-		glGenBuffers(1, &ubo_time);
-		glBindBuffer(GL_UNIFORM_BUFFER, ubo_time);
-		glObjectLabel(GL_BUFFER, ubo_time, -1, "agfx::UBO::TimeBlock");
-		glBufferStorage(GL_UNIFORM_BUFFER, UniformBlockSize::TIME, nullptr, GL_MAP_WRITE_BIT);
-		glBindBuffer(GL_UNIFORM_BUFFER, NULL);
-
-		glBindBufferBase(GL_UNIFORM_BUFFER, UniformBlockBinding::TIME, ubo_time);
 	}
 
-	void create_shader() noexcept
+	void create_shader()
 	{
-		static const std::string BASE_PATH = "../Working_Clean/src/";
+		static const std::string BASE_PATH = "../Working_Clean/shaders/";
+
+		static const std::string FNAME = "first";
 
 		Util::print_divider("Shader Compilation Begin");
 
 		try {
 			program = ShaderUtil::compile_shader(
-				BASE_PATH + "first.vert",
-				BASE_PATH + "first.frag");
+				BASE_PATH + FNAME + ".vert",
+				BASE_PATH + FNAME + ".frag",
+				"Shader::Main");
 
 			std::puts("Shader compiled successfully");
-
-			// Set window size uniform
-			glUseProgram(program);
-			Sint32 width, height;
-			SDL_GetWindowSize(window, &width, &height);
-			glUniform2i(0, width, height);
-			glUseProgram(NULL);
-
-			// Setup uniform blocks
-			if (const GLuint idx = glGetUniformBlockIndex(program, "TransformBlock"); idx == GL_INVALID_INDEX) {
-				std::cerr << "Failed to find index for transform block\n";
-			} else {
-				glUniformBlockBinding(program, idx, UniformBlockBinding::TRANFORM);
-				//glBindBufferBase(GL_UNIFORM_BUFFER, UniformBlockBinding::TRANFORM, ub_transform);
-			}
-
-			glBindBufferBase(GL_UNIFORM_BUFFER, UniformBlockBinding::TIME, ubo_time);
 
 			skip_render = false;
 		} catch (const ShaderCompilationException&) {
@@ -388,7 +298,16 @@ private:
 		Util::print_divider("Shader Compilation End");
 	}
 
-	void handle_events() noexcept
+	void on_window_resize(signed int width, signed int height)
+	{
+		Util::set_color(AnsiColor::GREEN);
+		std::cout << "Window resized to " << width << " x " << height << '\n';
+		Util::clear_color();
+
+		glViewport(0, 0, width, height);
+	}
+
+	void handle_events()
 	{
 		while (SDL_PollEvent(&cur_event)) {
 			switch (cur_event.type) {
@@ -422,20 +341,7 @@ private:
 				case SDL_WINDOWEVENT:
 					switch (cur_event.window.event) {
 						case SDL_WINDOWEVENT_SIZE_CHANGED:
-							Sint32 width = cur_event.window.data1;
-							Sint32 height = cur_event.window.data2;
-
-							Util::set_color(AnsiColor::GREEN);
-							std::cout << "Window resized to " << width << " x " << height << '\n';
-							Util::clear_color();
-
-							glViewport(0, 0, width, height);
-							if (program != NULL) {
-								glUseProgram(program);
-								glUniform2i(UNIFORM_WINDOW_SIZE, width, height);
-								glUseProgram(NULL);
-							}
-
+							on_window_resize(cur_event.window.data1, cur_event.window.data2);
 							break;
 					}
 					break;

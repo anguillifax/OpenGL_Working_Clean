@@ -8,7 +8,7 @@
 
 namespace coral {
 
-	GLuint ShaderUtil::compile_shader(const std::string& vertex_shader_path, const std::string& fragment_shader_path)
+	GLuint ShaderUtil::compile_shader(const std::string& vertex_shader_path, const std::string& fragment_shader_path, const char* label)
 	{
 		GLchar out_buf[1024];
 		const GLchar* src[1];
@@ -31,7 +31,7 @@ namespace coral {
 		create(fragment_shader_path, frag_shader);
 
 		GLuint program = glCreateProgram();
-		glObjectLabel(GL_PROGRAM, program, -1, "agfx::ShaderProgram");
+		glObjectLabel(GL_PROGRAM, program, -1, label);
 		glAttachShader(program, vertex_shader);
 		glAttachShader(program, frag_shader);
 
